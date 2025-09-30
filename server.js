@@ -1,6 +1,7 @@
 const express = require('express');
 const { spawn } = require('child_process');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const http = require('http');
 const app = express();
 
 // Parse MCP server configurations from environment variables
@@ -27,6 +28,46 @@ function parseServers() {
   });
 }
 
+// Check if a port is listening
+function checkPort(port, callback) {
+  const options = {
+    host: 'localhost',
+    port: port,
+    path: '/sse',
+    method: 'GET',
+    timeout: 1000
+  };
+
+  const req = http.request(options, (res) => {
+    callback(true);
+    req.abort();
+  });
+
+  req.on('error', () => {
+    callback(false);
+  });
+
+  req.on('timeout', () => {
+    callback(false);
+    req.abort();
+  });
+
+  req.end();
+}
+
+// Update server status
+function updateServerStatus(serverName, port) {
+  const serverIndex = servers.findIndex(s => s.name === serverName);
+  if (serverIndex === -1) return;
+
+  checkPort(port, (isRunning) => {
+    servers[serverIndex].status = isRunning ? 'ready' : 'starting';
+    if (isRunning) {
+      console.log(`[${serverName}] Status: READY ✓`);
+    }
+  });
+}
+
 // Start a Supergateway instance for each MCP server
 function startMcpServer(config) {
   console.log(`Starting MCP server: ${config.name} on internal port ${config.port}`);
@@ -50,7 +91,13 @@ function startMcpServer(config) {
   });
 
   proc.stdout.on('data', (data) => {
-    console.log(`[${config.name}] ${data.toString().trim()}`);
+    const output = data.toString().trim();
+    console.log(`[${config.name}] ${output}`);
+    
+    // Check if server is ready
+    if (output.includes('Listening on port') || output.includes('SSE endpoint')) {
+      setTimeout(() => updateServerStatus(config.name, config.port), 2000);
+    }
   });
 
   proc.stderr.on('data', (data) => {
@@ -59,10 +106,18 @@ function startMcpServer(config) {
 
   proc.on('close', (code) => {
     console.log(`[${config.name}] Process exited with code ${code}`);
+    const serverIndex = servers.findIndex(s => s.name === config.name);
+    if (serverIndex !== -1) {
+      servers[serverIndex].status = 'stopped';
+    }
   });
 
   proc.on('error', (err) => {
     console.error(`[${config.name}] Failed to start: ${err.message}`);
+    const serverIndex = servers.findIndex(s => s.name === config.name);
+    if (serverIndex !== -1) {
+      servers[serverIndex].status = 'error';
+    }
   });
 
   processes.push({ config, proc });
@@ -76,6 +131,14 @@ function startMcpServer(config) {
     path: `/${config.name}`,
     status: 'starting'
   });
+
+  // Check status periodically
+  const statusInterval = setInterval(() => {
+    updateServerStatus(config.name, config.port);
+  }, 10000); // Check every 10 seconds
+
+  // Store interval for cleanup
+  processes[processes.length - 1].statusInterval = statusInterval;
 }
 
 // Setup proxy routes for an MCP server
@@ -88,9 +151,17 @@ function setupProxyRoutes(config) {
     pathRewrite: { [`^/${config.name}/sse`]: '/sse' },
     changeOrigin: true,
     ws: false,
+    onProxyReq: (proxyReq, req, res) => {
+      // Update status on successful proxy
+      updateServerStatus(config.name, config.port);
+    },
     onError: (err, req, res) => {
       console.error(`[${config.name}] Proxy error:`, err.message);
-      res.status(500).json({ error: 'MCP server not ready' });
+      const serverIndex = servers.findIndex(s => s.name === config.name);
+      if (serverIndex !== -1) {
+        servers[serverIndex].status = 'error';
+      }
+      res.status(503).json({ error: 'MCP server not ready', details: err.message });
     }
   }));
   
@@ -102,7 +173,7 @@ function setupProxyRoutes(config) {
     ws: false,
     onError: (err, req, res) => {
       console.error(`[${config.name}] Proxy error:`, err.message);
-      res.status(500).json({ error: 'MCP server not ready' });
+      res.status(503).json({ error: 'MCP server not ready', details: err.message });
     }
   }));
 
@@ -114,7 +185,8 @@ function setupProxyRoutes(config) {
 // Status endpoint
 app.get('/', (req, res) => {
   const host = req.get('host') || `localhost:${MAIN_PORT}`;
-  const protocol = req.protocol;
+  // Force HTTPS for onrender.com domains
+  const protocol = host.includes('onrender.com') ? 'https' : req.protocol;
   const baseUrl = `${protocol}://${host}`;
   
   const serverList = servers.map(s => ({
@@ -143,7 +215,15 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', servers: servers.length });
+  const readyServers = servers.filter(s => s.status === 'ready').length;
+  const allReady = servers.length > 0 && readyServers === servers.length;
+  
+  res.json({ 
+    status: allReady ? 'ready' : 'starting',
+    servers: servers.length,
+    ready: readyServers,
+    details: servers.map(s => ({ name: s.name, status: s.status }))
+  });
 });
 
 // Parse and start all configured MCP servers
@@ -170,8 +250,9 @@ app.listen(MAIN_PORT, () => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('Received SIGTERM, shutting down gracefully...');
-  processes.forEach(({ config, proc }) => {
+  processes.forEach(({ config, proc, statusInterval }) => {
     console.log(`Stopping ${config.name}...`);
+    if (statusInterval) clearInterval(statusInterval);
     proc.kill();
   });
   process.exit(0);
