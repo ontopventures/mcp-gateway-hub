@@ -4,8 +4,8 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const app = express();
 
 // Parse MCP server configurations from environment variables
-// Format: MCP_SERVERS=supabase:npx @modelcontextprotocol/server-supabase,fetch:npx mcp-server-fetch
-const MCP_SERVERS = process.env.MCP_SERVERS || 'supabase:npx @modelcontextprotocol/server-supabase';
+// Format: MCP_SERVERS=supabase:npx -y @supabase/mcp-server-supabase --read-only --project-ref=${SUPABASE_PROJECT_REF}
+const MCP_SERVERS = process.env.MCP_SERVERS || `supabase:npx -y @supabase/mcp-server-supabase --read-only --project-ref=${process.env.SUPABASE_PROJECT_REF || ''}`;
 const MAIN_PORT = process.env.PORT || 8000;
 const BASE_INTERNAL_PORT = 9000; // Internal ports start here
 
@@ -16,9 +16,9 @@ let portCounter = 0;
 // Parse server configurations
 function parseServers() {
   return MCP_SERVERS.split(',').map(config => {
-    const parts = config.split(':');
-    const name = parts[0].trim();
-    const command = parts.slice(1).join(':').trim();
+    const colonIndex = config.indexOf(':');
+    const name = config.substring(0, colonIndex).trim();
+    const command = config.substring(colonIndex + 1).trim();
     return {
       name,
       command,
