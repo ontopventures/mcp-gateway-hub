@@ -1,14 +1,14 @@
 {
   "name": "mcp-gateway-hub",
-  "version": "1.0.0",
-  "description": "Multi-MCP server gateway using Supergateway",
+  "version": "2.0.0",
+  "description": "Multi-MCP server gateway using mcp-gateway",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "http-proxy-middleware": "^2.0.6"
+    "mcp-gateway": "github:acehoss/mcp-gateway",
+    "js-yaml": "^4.1.0"
   },
   "engines": {
     "node": ">=18"
