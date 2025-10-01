@@ -73,7 +73,7 @@ console.log('');
 const processes = [];
 
 // Helper function to check if a port is listening
-function checkPort(port, maxAttempts = 30, interval = 1000) {
+function checkPort(port, maxAttempts = 60, interval = 1000) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
     
@@ -249,14 +249,13 @@ MCP_SERVERS.forEach(server => {
   console.log(`   Port: ${server.port}`);
   console.log(`   Command: ${server.command} ${server.args.join(' ')}`);
   
-  // Build the full command for Supergateway
-  const supergatewayCmdString = `${server.command} ${server.args.join(' ')}`;
-  
+  // Build the full command for Supergateway - each arg must be separate
   const supergateawayArgs = [
     '-y',
     'supergateway',
     '--stdio',
-    supergatewayCmdString,
+    server.command,
+    ...server.args,  // Spread the args array so each is a separate argument
     '--port',
     server.port.toString(),
     '--baseUrl',
@@ -301,11 +300,16 @@ MCP_SERVERS.forEach(server => {
   });
 
   proc.on('error', (err) => {
-    console.error(`[${server.name}] Failed to start: ${err.message}`);
+    console.error(`[${server.name}] Failed to start process: ${err.message}`);
+    console.error(`[${server.name}] Command was: npx ${supergateawayArgs.join(' ')}`);
   });
 
   proc.on('exit', (code, signal) => {
-    console.log(`[${server.name}] Exited with code ${code} and signal ${signal}`);
+    if (code !== 0 && code !== null) {
+      console.error(`[${server.name}] Process exited with code ${code} and signal ${signal}`);
+    } else {
+      console.log(`[${server.name}] Process exited with code ${code} and signal ${signal}`);
+    }
   });
 
   processes.push({ name: server.name, process: proc, port: server.port });
@@ -388,7 +392,7 @@ Promise.all(
     
     res.json({ 
       status: 'ok',
-      version: '2.2.0',
+      version: '2.2.1',
       servers: serverStatus
     });
   });

@@ -1,5 +1,30 @@
 # Changelog
 
+## Version 2.2.1 - DEPLOYMENT FIX: Correct Supergateway Argument Passing
+
+### Critical Deployment Fix
+
+**Fixed Supergateway spawning that prevented the service from starting!**
+
+The spawn command was passing the MCP server command as a single concatenated string instead of separate arguments. This caused Supergateway to fail to start, leading to port timeout errors and deployment failures.
+
+**Changes:**
+- ✅ **Fixed argument passing** - Use array spread to pass each arg separately
+- ✅ **Increased startup timeout** - Back to 60s to allow for npm package downloads
+- ✅ **Better error logging** - Show the actual command when spawn fails
+- ✅ **Improved exit logging** - Distinguish error exits from clean exits
+
+**Before (broken):**
+```javascript
+const cmd = `npx -y @supabase/mcp-server...`;  // Single string
+supergateawayArgs = ['--stdio', cmd];  // ❌ Wrong!
+```
+
+**After (fixed):**
+```javascript
+supergateawayArgs = ['--stdio', 'npx', '-y', '@supabase/mcp-server...'];  // ✅ Correct!
+```
+
 ## Version 2.2.0 - CRITICAL FIX: Enable n8n/MCP Client Connection
 
 ### Critical Bug Fix
