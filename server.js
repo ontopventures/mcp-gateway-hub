@@ -261,14 +261,13 @@ MCP_SERVERS.forEach(server => {
 
   console.log(`   Supergateway command: ${fullCommand}\n`);
 
-  // Use shell: true with full command string (NOT array)
-  const proc = spawn(fullCommand, {
+  // CRITICAL: When using shell:true, pass command as first arg, empty array as second
+  const proc = spawn('/bin/sh', ['-c', fullCommand], {
     env: {
       ...process.env,
       ...server.env
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: true  // Required for proper command execution
+    stdio: ['ignore', 'pipe', 'pipe']
   });
 
   // Prefix logs with server name

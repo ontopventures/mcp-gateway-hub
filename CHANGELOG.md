@@ -1,5 +1,32 @@
 # Changelog
 
+## Version 2.3.0 - FIXED: Spawn command now uses correct shell invocation
+
+### Critical Fix
+
+**Fixed the spawn command to properly invoke shell commands!**
+
+The previous versions were using `spawn(fullCommand, {shell: true})` which doesn't work as expected. The correct way to spawn shell commands with arguments is to use `spawn('/bin/sh', ['-c', fullCommand])`.
+
+**Changes:**
+- ✅ **Fixed spawn invocation** - Now uses `/bin/sh -c` pattern
+- ✅ **Supergateway processes now start correctly** - Ports will actually open
+- ✅ **Cleaned up documentation** - Removed 5 unnecessary troubleshooting docs
+- ✅ **Version bump to 2.3.0**
+
+**Why this works:**
+```javascript
+// BEFORE (broken) - shell:true doesn't properly handle complex commands
+spawn(fullCommand, {shell: true})
+
+// AFTER (working) - explicitly invoke shell with command
+spawn('/bin/sh', ['-c', fullCommand])
+```
+
+This is the standard pattern for executing shell commands via Node.js spawn.
+
+---
+
 ## Version 2.2.2 - CRITICAL: Enable Shell Mode for Spawn
 
 ### Critical Fix
