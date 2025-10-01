@@ -1,7 +1,7 @@
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
 const { spawn } = require('child_process');
 const net = require('net');
+const http = require('http');
 
 const PORT = process.env.PORT || 8000;
 
@@ -79,6 +79,75 @@ function checkPort(port, maxAttempts = 60, interval = 2000) {
   });
 }
 
+// Manual SSE proxy function
+function proxySSE(serverName, targetPort, req, res) {
+  // Remove the server name prefix from the path
+  const targetPath = req.path.replace(`/${serverName}`, '');
+  
+  console.log(`[${serverName}] Proxying ${req.method} ${req.path} → http://localhost:${targetPort}${targetPath}`);
+
+  const options = {
+    hostname: 'localhost',
+    port: targetPort,
+    path: targetPath + (req.url.includes('?') ? '?' + req.url.split('?')[1] : ''),
+    method: req.method,
+    headers: {
+      ...req.headers,
+      host: `localhost:${targetPort}`
+    }
+  };
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    // Set SSE headers
+    res.writeHead(proxyRes.statusCode, {
+      ...proxyRes.headers,
+      'Content-Type': proxyRes.headers['content-type'] || 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    // Stream the response directly
+    proxyRes.pipe(res);
+
+    proxyRes.on('error', (err) => {
+      console.error(`[${serverName}] Proxy response error:`, err.message);
+      if (!res.headersSent) {
+        res.status(502).json({ 
+          error: 'Bad Gateway',
+          server: serverName,
+          message: err.message 
+        });
+      }
+    });
+  });
+
+  // Handle request errors
+  proxyReq.on('error', (err) => {
+    console.error(`[${serverName}] Proxy request error:`, err.message);
+    if (!res.headersSent) {
+      res.status(502).json({ 
+        error: 'Bad Gateway',
+        server: serverName,
+        message: err.message 
+      });
+    }
+  });
+
+  // Forward request body if present
+  if (req.method === 'POST' || req.method === 'PUT') {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
+
+  // Handle client disconnect
+  req.on('close', () => {
+    console.log(`[${serverName}] Client disconnected`);
+    proxyReq.destroy();
+  });
+}
+
 // Spawn Supergateway instance for each MCP server
 MCP_SERVERS.forEach(server => {
   console.log(`📦 Starting ${server.name} MCP Server...`);
@@ -127,7 +196,12 @@ MCP_SERVERS.forEach(server => {
   proc.stderr.on('data', (data) => {
     const lines = data.toString().split('\n').filter(l => l.trim());
     lines.forEach(line => {
-      console.error(`[${server.name}] ${line}`);
+      // Don't log "running on stdio" messages as errors
+      if (line.includes('running on stdio')) {
+        console.log(`[${server.name}] ${line}`);
+      } else {
+        console.error(`[${server.name}] ${line}`);
+      }
     });
   });
 
@@ -162,6 +236,21 @@ Promise.all(
 
   const app = express();
 
+  // Disable Express's view cache
+  app.disable('view cache');
+  
+  // Disable etag for SSE responses
+  app.disable('etag');
+
+  // Parse JSON for non-SSE requests
+  app.use((req, res, next) => {
+    if (!req.path.endsWith('/sse')) {
+      express.json()(req, res, next);
+    } else {
+      next();
+    }
+  });
+
   // Health check endpoint
   app.get('/health', (req, res) => {
     res.json({ 
@@ -187,49 +276,18 @@ Promise.all(
     });
   });
 
-  // Create proxy middleware for each MCP server
+  // Create routes for each MCP server using manual SSE proxy
   MCP_SERVERS.forEach(server => {
-    const proxyOptions = {
-      target: `http://localhost:${server.port}`,
-      changeOrigin: true,
-      ws: false, // Supergateway uses SSE, not WebSockets
-      pathRewrite: (path) => {
-        // Remove the server name prefix from the path
-        // e.g., /supabase/sse -> /sse
-        return path.replace(`/${server.name}`, '');
-      },
-      onProxyReq: (proxyReq, req, res) => {
-        // Disable buffering for SSE
-        proxyReq.setHeader('X-Accel-Buffering', 'no');
-      },
-      onProxyRes: (proxyRes, req, res) => {
-        // Ensure proper SSE headers
-        if (req.path.endsWith('/sse')) {
-          proxyRes.headers['content-type'] = 'text/event-stream';
-          proxyRes.headers['cache-control'] = 'no-cache';
-          proxyRes.headers['connection'] = 'keep-alive';
-          proxyRes.headers['x-accel-buffering'] = 'no';
-        }
-      },
-      onError: (err, req, res) => {
-        console.error(`[${server.name}] Proxy error:`, err.message);
-        res.status(502).json({ 
-          error: 'Bad Gateway',
-          server: server.name,
-          message: err.message 
-        });
-      },
-      logLevel: 'silent' // We handle logging ourselves
-    };
-
-    const proxy = createProxyMiddleware(proxyOptions);
-    app.use(`/${server.name}`, proxy);
+    // Route all requests for this server through our manual proxy
+    app.all(`/${server.name}/*`, (req, res) => {
+      proxySSE(server.name, server.port, req, res);
+    });
     
     console.log(`✅ Proxy route configured: /${server.name}/* → http://localhost:${server.port}`);
   });
 
   // Start Express server
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🎉 MCP Gateway Hub is running!`);
     console.log(`\n📍 Endpoints:`);
     console.log(`   Health Check: http://localhost:${PORT}/health`);
@@ -244,6 +302,11 @@ Promise.all(
     
     console.log(`\n💡 To add more MCP servers, edit the MCP_SERVERS array in server.js\n`);
   });
+
+  // Increase timeout for SSE connections
+  httpServer.setTimeout(0); // No timeout
+  httpServer.keepAliveTimeout = 0; // Keep connections alive indefinitely
+
 }).catch(err => {
   console.error('\n❌ Failed to start MCP Gateway Hub:', err.message);
   console.error('   Shutting down...\n');
