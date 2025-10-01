@@ -79,12 +79,24 @@ function checkPort(port, maxAttempts = 60, interval = 2000) {
   });
 }
 
-// Manual SSE proxy function
+// FIXED: Manual SSE proxy function with proper streaming
 function proxySSE(serverName, targetPort, req, res) {
-  // Remove the server name prefix from the path
   const targetPath = req.path.replace(`/${serverName}`, '');
   
   console.log(`[${serverName}] Proxying ${req.method} ${req.path} → http://localhost:${targetPort}${targetPath}`);
+
+  // CRITICAL: Set SSE headers BEFORE making proxy request
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',  // Disable nginx buffering
+    'Transfer-Encoding': 'identity'  // Disable chunked encoding
+  });
+
+  // CRITICAL: Disable TCP buffering at socket level
+  res.socket.setNoDelay(true);
+  res.socket.setKeepAlive(true);
 
   const options = {
     hostname: 'localhost',
@@ -93,36 +105,47 @@ function proxySSE(serverName, targetPort, req, res) {
     method: req.method,
     headers: {
       ...req.headers,
-      host: `localhost:${targetPort}`
+      host: `localhost:${targetPort}`,
+      connection: 'keep-alive'
     }
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
-    // Set SSE headers
-    res.writeHead(proxyRes.statusCode, {
-      ...proxyRes.headers,
-      'Content-Type': proxyRes.headers['content-type'] || 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
+    console.log(`[${serverName}] Connected to backend, status: ${proxyRes.statusCode}`);
+
+    // CRITICAL: Forward each chunk immediately as it arrives
+    // DO NOT use .pipe() - it buffers!
+    proxyRes.on('data', (chunk) => {
+      try {
+        // Immediately write each chunk without buffering
+        res.write(chunk);
+        // Force flush
+        if (res.flush) res.flush();
+      } catch (err) {
+        console.error(`[${serverName}] Error writing chunk:`, err.message);
+      }
     });
 
-    // Stream the response directly
-    proxyRes.pipe(res);
+    proxyRes.on('end', () => {
+      console.log(`[${serverName}] Backend connection ended`);
+      res.end();
+    });
 
     proxyRes.on('error', (err) => {
-      console.error(`[${serverName}] Proxy response error:`, err.message);
+      console.error(`[${serverName}] Backend error:`, err.message);
       if (!res.headersSent) {
         res.status(502).json({ 
           error: 'Bad Gateway',
           server: serverName,
           message: err.message 
         });
+      } else {
+        res.end();
       }
     });
   });
 
-  // Handle request errors
+  // Handle proxy request errors
   proxyReq.on('error', (err) => {
     console.error(`[${serverName}] Proxy request error:`, err.message);
     if (!res.headersSent) {
@@ -131,10 +154,12 @@ function proxySSE(serverName, targetPort, req, res) {
         server: serverName,
         message: err.message 
       });
+    } else {
+      res.end();
     }
   });
 
-  // Forward request body if present
+  // Forward request body for POST/PUT
   if (req.method === 'POST' || req.method === 'PUT') {
     req.pipe(proxyReq);
   } else {
@@ -236,13 +261,12 @@ Promise.all(
 
   const app = express();
 
-  // Disable Express's view cache
+  // CRITICAL: Disable ALL automatic buffering in Express
   app.disable('view cache');
-  
-  // Disable etag for SSE responses
   app.disable('etag');
+  app.disable('x-powered-by');
 
-  // Parse JSON for non-SSE requests
+  // Parse JSON for non-SSE requests only
   app.use((req, res, next) => {
     if (!req.path.endsWith('/sse')) {
       express.json()(req, res, next);
@@ -303,9 +327,10 @@ Promise.all(
     console.log(`\n💡 To add more MCP servers, edit the MCP_SERVERS array in server.js\n`);
   });
 
-  // Increase timeout for SSE connections
-  httpServer.setTimeout(0); // No timeout
-  httpServer.keepAliveTimeout = 0; // Keep connections alive indefinitely
+  // CRITICAL: Disable server timeouts for long-lived SSE connections
+  httpServer.setTimeout(0);
+  httpServer.keepAliveTimeout = 0;
+  httpServer.headersTimeout = 0;
 
 }).catch(err => {
   console.error('\n❌ Failed to start MCP Gateway Hub:', err.message);
