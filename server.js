@@ -79,24 +79,11 @@ function checkPort(port, maxAttempts = 60, interval = 2000) {
   });
 }
 
-// FIXED: Manual SSE proxy function with proper streaming
+// FIXED: Proper SSE proxy that waits for backend response
 function proxySSE(serverName, targetPort, req, res) {
   const targetPath = req.path.replace(`/${serverName}`, '');
   
   console.log(`[${serverName}] Proxying ${req.method} ${req.path} → http://localhost:${targetPort}${targetPath}`);
-
-  // CRITICAL: Set SSE headers BEFORE making proxy request
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',  // Disable nginx buffering
-    'Transfer-Encoding': 'identity'  // Disable chunked encoding
-  });
-
-  // CRITICAL: Disable TCP buffering at socket level
-  res.socket.setNoDelay(true);
-  res.socket.setKeepAlive(true);
 
   const options = {
     hostname: 'localhost',
@@ -111,15 +98,33 @@ function proxySSE(serverName, targetPort, req, res) {
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
-    console.log(`[${serverName}] Connected to backend, status: ${proxyRes.statusCode}`);
+    console.log(`[${serverName}] Backend responded with status: ${proxyRes.statusCode}`);
+
+    // CRITICAL: Wait for backend response, then set SSE headers based on backend
+    const headers = {
+      ...proxyRes.headers,
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    };
+
+    // If this is an SSE endpoint, ensure proper Content-Type
+    if (req.path.endsWith('/sse')) {
+      headers['Content-Type'] = 'text/event-stream';
+    }
+
+    // Write headers from backend response
+    res.writeHead(proxyRes.statusCode, headers);
+
+    // CRITICAL: Disable TCP buffering at socket level
+    res.socket.setNoDelay(true);
+    res.socket.setKeepAlive(true);
 
     // CRITICAL: Forward each chunk immediately as it arrives
-    // DO NOT use .pipe() - it buffers!
     proxyRes.on('data', (chunk) => {
       try {
-        // Immediately write each chunk without buffering
         res.write(chunk);
-        // Force flush
+        // Force flush if available
         if (res.flush) res.flush();
       } catch (err) {
         console.error(`[${serverName}] Error writing chunk:`, err.message);
@@ -132,16 +137,8 @@ function proxySSE(serverName, targetPort, req, res) {
     });
 
     proxyRes.on('error', (err) => {
-      console.error(`[${serverName}] Backend error:`, err.message);
-      if (!res.headersSent) {
-        res.status(502).json({ 
-          error: 'Bad Gateway',
-          server: serverName,
-          message: err.message 
-        });
-      } else {
-        res.end();
-      }
+      console.error(`[${serverName}] Backend stream error:`, err.message);
+      res.end();
     });
   });
 
