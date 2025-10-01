@@ -1,5 +1,30 @@
 # Changelog
 
+## Version 2.2.2 - CRITICAL: Enable Shell Mode for Spawn
+
+### Critical Fix
+
+**Added `shell: true` to spawn() to enable proper command execution!**
+
+The issue was that Supergateway's `--stdio` flag expects the MCP command as a SINGLE argument (e.g., `"npx -y @supabase/..."`), but Node's spawn() was treating each word as a separate argument. This caused Supergateway to fail silently because it only saw `--stdio npx` and didn't understand the rest.
+
+**Solution:** Use `shell: true` in spawn options so the shell properly parses the command string.
+
+**Changes:**
+- ✅ **Added `shell: true`** - Enables proper argument parsing by the shell
+- ✅ **Kept single string format** - MCP command passed as one argument to --stdio
+- ✅ **Better logging** - Shows exact command being executed
+
+**Before (broken):**
+```javascript
+spawn('npx', ['--stdio', 'npx', '-y', ...], {})  // Each word separate ❌
+```
+
+**After (fixed):**
+```javascript
+spawn('npx', ['--stdio', 'npx -y @supabase/...'], {shell: true})  // Proper ✅
+```
+
 ## Version 2.2.1 - DEPLOYMENT FIX: Correct Supergateway Argument Passing
 
 ### Critical Deployment Fix

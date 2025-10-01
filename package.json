@@ -1,6 +1,6 @@
 {
   "name": "mcp-gateway-hub",
-  "version": "2.2.1",
+  "version": "2.2.3",
   "description": "Multi-MCP server gateway using Supergateway and Express reverse proxy",
   "main": "server.js",
   "scripts": {

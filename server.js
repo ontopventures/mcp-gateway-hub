@@ -249,34 +249,26 @@ MCP_SERVERS.forEach(server => {
   console.log(`   Port: ${server.port}`);
   console.log(`   Command: ${server.command} ${server.args.join(' ')}`);
   
-  // Build the full command for Supergateway - each arg must be separate
-  const supergateawayArgs = [
-    '-y',
-    'supergateway',
-    '--stdio',
-    server.command,
-    ...server.args,  // Spread the args array so each is a separate argument
-    '--port',
-    server.port.toString(),
-    '--baseUrl',
-    `http://localhost:${server.port}`,
-    '--ssePath',
-    '/sse',
-    '--messagePath',
-    '/message',
-    '--cors',
-    '--logLevel',
-    'info'
-  ];
+  // Build the MCP server command as a SINGLE string (required by --stdio flag)
+  const mcpServerCmd = `${server.command} ${server.args.join(' ')}`;
+  
+  // CRITICAL: When using shell:true, must pass ENTIRE command as single string
+  // Escape double quotes in the command to prevent injection
+  const escapedCmd = mcpServerCmd.replace(/"/g, '\\"');
+  
+  // Properly quote the --stdio argument which contains spaces
+  const fullCommand = `npx -y supergateway --stdio "${escapedCmd}" --port ${server.port} --baseUrl http://localhost:${server.port} --ssePath /sse --messagePath /message --cors --logLevel info`;
 
-  console.log(`   Supergateway: npx ${supergateawayArgs.join(' ')}\n`);
+  console.log(`   Supergateway command: ${fullCommand}\n`);
 
-  const proc = spawn('npx', supergateawayArgs, {
+  // Use shell: true with full command string (NOT array)
+  const proc = spawn(fullCommand, {
     env: {
       ...process.env,
       ...server.env
     },
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: true  // Required for proper command execution
   });
 
   // Prefix logs with server name
@@ -301,7 +293,7 @@ MCP_SERVERS.forEach(server => {
 
   proc.on('error', (err) => {
     console.error(`[${server.name}] Failed to start process: ${err.message}`);
-    console.error(`[${server.name}] Command was: npx ${supergateawayArgs.join(' ')}`);
+    console.error(`[${server.name}] Command was: ${fullCommand}`);
   });
 
   proc.on('exit', (code, signal) => {
@@ -392,7 +384,7 @@ Promise.all(
     
     res.json({ 
       status: 'ok',
-      version: '2.2.1',
+      version: '2.2.3',
       servers: serverStatus
     });
   });
