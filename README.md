@@ -1,15 +1,16 @@
 # MCP Gateway Hub
 
-A multi-MCP server gateway built on [Supergateway](https://github.com/supercorp-ai/supergateway). Host multiple MCP servers with a single deployment through one port.
+A multi-MCP server gateway built on [mcp-gateway](https://github.com/acehoss/mcp-gateway). Host multiple MCP servers with a single deployment through one port.
 
 ## Features
 
 - 🚀 Host multiple MCP servers simultaneously
-- 🔧 Easy configuration via environment variables
+- 🔧 Easy YAML configuration
 - 🌐 Single-port architecture (perfect for Render, Railway, etc.)
-- 🔄 Automatic reverse proxy routing
-- 📊 Status endpoint showing all available servers
+- 🔄 Path-based routing (`/supabase`, `/git`, `/github`, etc.)
+- 📊 Session management for multiple clients
 - 🐳 Docker support
+- 🔐 Optional authentication (Bearer tokens or Basic Auth)
 - ☁️ Ready for Render deployment
 
 ## Architecture
@@ -17,30 +18,14 @@ A multi-MCP server gateway built on [Supergateway](https://github.com/supercorp-
 All MCP servers are accessible through a single port with path-based routing:
 
 ```
-https://your-app.onrender.com/supabase/sse    -> Supabase MCP SSE endpoint
-https://your-app.onrender.com/supabase/message -> Supabase MCP message endpoint
-https://your-app.onrender.com/fetch/sse        -> Fetch MCP SSE endpoint
-https://your-app.onrender.com/fetch/message    -> Fetch MCP message endpoint
+https://your-app.onrender.com/supabase    -> Supabase MCP Server
+https://your-app.onrender.com/git         -> Git MCP Server
+https://your-app.onrender.com/github      -> GitHub MCP Server
 ```
+
+Each server maintains its own SSE connection at `/{server-name}/sse` and message endpoint at `/{server-name}/message`.
 
 ## Quick Start
-
-### Environment Variables
-
-Configure your MCP servers using the `MCP_SERVERS` environment variable:
-
-```bash
-MCP_SERVERS=name:command,name:command
-```
-
-**Examples:**
-```bash
-# Single server
-MCP_SERVERS=supabase:npx @modelcontextprotocol/server-supabase
-
-# Multiple servers
-MCP_SERVERS=supabase:npx @modelcontextprotocol/server-supabase,fetch:npx mcp-server-fetch,git:uvx mcp-server-git
-```
 
 ### Local Development
 
@@ -48,47 +33,108 @@ MCP_SERVERS=supabase:npx @modelcontextprotocol/server-supabase,fetch:npx mcp-ser
 # Install dependencies
 npm install
 
-# Set your MCP servers
-export MCP_SERVERS="supabase:npx @modelcontextprotocol/server-supabase"
+# Set environment variables
+export SUPABASE_PROJECT_REF=your-project-ref
+export SUPABASE_ACCESS_TOKEN=your-access-token
 
-# Start the server
+# Start the gateway
 npm start
 ```
 
-Visit `http://localhost:8000` to see the status page with all available MCP servers.
+Visit `http://localhost:8000` to see the gateway status.
 
-### Docker
+### Deploy to Render
 
-```bash
-# Build the image
-docker build -t mcp-gateway-hub .
+1. Fork this repository
+2. Go to [Render Dashboard](https://dashboard.render.com)
+3. Create a new Web Service
+4. Connect your forked repository
+5. Set environment variables:
+   - `SUPABASE_PROJECT_REF` - Your Supabase project reference ID
+   - `SUPABASE_ACCESS_TOKEN` - Your Supabase personal access token
+   - Add any other tokens for additional MCP servers
+6. Click "Create Web Service"
 
-# Run with configuration
-docker run -p 8000:8000 \
-  -e MCP_SERVERS="supabase:npx @modelcontextprotocol/server-supabase" \
-  mcp-gateway-hub
+## Configuration
+
+Edit `config.yaml` to configure your MCP servers:
+
+```yaml
+hostname: "0.0.0.0"
+port: ${PORT:-8000}
+
+servers:
+  supabase:
+    command: npx
+    args:
+      - -y
+      - "@supabase/mcp-server-supabase"
+      - "--read-only"
+      - "--project-ref=${SUPABASE_PROJECT_REF}"
+    env:
+      SUPABASE_ACCESS_TOKEN: "${SUPABASE_ACCESS_TOKEN}"
+  
+  github:
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-github"
+    env:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
 ```
 
 ## Adding More MCP Servers
 
-Simply update the `MCP_SERVERS` environment variable:
+1. Edit `config.yaml` and add your server under the `servers` section
+2. Add required environment variables to Render
+3. Redeploy (automatic if auto-deploy is enabled)
 
-```bash
-export MCP_SERVERS="supabase:npx @modelcontextprotocol/server-supabase,fetch:npx mcp-server-fetch,git:uvx mcp-server-git"
+### Popular MCP Servers
+
+```yaml
+# Filesystem access
+filesystem:
+  command: npx
+  args:
+    - -y
+    - "@modelcontextprotocol/server-filesystem"
+    - "/tmp"
+
+# Git repository access
+git:
+  command: npx
+  args:
+    - -y
+    - "@modelcontextprotocol/server-git"
+
+# PostgreSQL database
+postgres:
+  command: npx
+  args:
+    - -y
+    - "@modelcontextprotocol/server-postgres"
+  env:
+    POSTGRES_CONNECTION_STRING: "${POSTGRES_CONNECTION_STRING}"
+
+# Web scraping
+fetch:
+  command: npx
+  args:
+    - -y
+    - "mcp-server-fetch"
 ```
 
-Restart your service and the new MCP servers will be available automatically.
+Browse more at [MCP Servers Directory](https://github.com/modelcontextprotocol/servers)
 
-## Connecting to Your MCP Servers
+## Using with n8n
 
-Each MCP server exposes two endpoints through the main domain:
+In your n8n MCP Client node:
 
-- **SSE Endpoint**: `https://your-domain/{server-name}/sse`
-- **Message Endpoint**: `https://your-domain/{server-name}/message`
+- **Endpoint**: `https://your-app.onrender.com/supabase` (or any other server name)
+- **Authentication**: None (unless you enable it in config)
+- **Tools to Include**: All
 
-### Example with Claude Desktop
-
-Visit your deployed app's root URL to get the exact configuration. It will show:
+## Using with Claude Desktop
 
 ```json
 {
@@ -99,110 +145,69 @@ Visit your deployed app's root URL to get the exact configuration. It will show:
         "-y",
         "supergateway",
         "--sse",
-        "https://your-app.onrender.com/supabase/sse"
+        "https://your-app.onrender.com/supabase"
       ]
     }
   }
 }
 ```
 
-Copy this into your `claude_desktop_config.json`.
+## Authentication (Optional)
 
-## Deploy to Render
+To secure your gateway, uncomment the auth section in `config.yaml`:
 
-### Option 1: Fork and Deploy
-1. Fork this repository
-2. Go to [Render Dashboard](https://dashboard.render.com)
-3. Create a new Web Service
-4. Connect your forked repository
-5. Set environment variables:
-   - `MCP_SERVERS=supabase:npx @modelcontextprotocol/server-supabase`
-6. Click "Create Web Service"
-
-### Option 2: Deploy from this repo
-1. Go to [Render Dashboard](https://dashboard.render.com)
-2. Create a new Web Service
-3. Connect this repository: `https://github.com/ontopventures/mcp-gateway-hub`
-4. Set environment variables
-5. Deploy!
-
-## Status Endpoint
-
-The root URL provides a status endpoint with configuration examples:
-
-```bash
-curl https://your-app.onrender.com
+```yaml
+auth:
+  bearer:
+    enabled: true
+    tokens:
+      - "${MCP_AUTH_TOKEN}"
 ```
 
-Response includes:
-- List of all running MCP servers
-- Their SSE and message URLs
-- Example Claude Desktop configuration
-- Documentation links
+Then set `MCP_AUTH_TOKEN` in your Render environment variables.
 
-## Common MCP Servers
-
-```bash
-# Supabase
-supabase:npx @modelcontextprotocol/server-supabase
-
-# Filesystem
-filesystem:npx @modelcontextprotocol/server-filesystem /path
-
-# Fetch (web scraping)
-fetch:npx mcp-server-fetch
-
-# Git
-git:uvx mcp-server-git
-
-# PostgreSQL
-postgres:npx @modelcontextprotocol/server-postgres
-
-# Memory (for AI context)
-memory:npx @modelcontextprotocol/server-memory
+Clients must include the Bearer token:
+```
+Authorization: Bearer your-token-here
 ```
 
-## Environment Variables for MCP Servers
+## Environment Variables
 
-If your MCP servers need additional configuration (API keys, URLs, etc.), add them as environment variables:
-
-```bash
-# For Supabase MCP
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your-key
-
-# For other servers
-OPENAI_API_KEY=your-key
-POSTGRES_CONNECTION_STRING=postgresql://...
-```
+- `PORT` - Port to listen on (Render sets this automatically)
+- `SUPABASE_PROJECT_REF` - Your Supabase project ID
+- `SUPABASE_ACCESS_TOKEN` - Your Supabase personal access token
+- `MCP_AUTH_TOKEN` - (Optional) Bearer token for gateway authentication
+- Add any other tokens required by your MCP servers
 
 ## Troubleshooting
 
-### Server not responding
+### Server not starting
 - Check Render logs for errors
-- Ensure MCP_SERVERS environment variable is set correctly
-- Verify the MCP server command is valid
+- Verify all environment variables are set correctly
+- Ensure the MCP server command is valid
 
-### Connection refused
-- The MCP servers need a few seconds to start
-- Check the status endpoint to see if servers are ready
+### Connection refused from n8n
+- Verify the endpoint URL is correct (`/servername`, not `/servername/sse`)
+- Check if authentication is required
+- Look at Render logs for connection attempts
 
-### Command not found errors
-- Some MCP servers require `uvx` instead of `npx`
-- Check the MCP server's documentation for the correct command
+### MCP server fails to start
+- Check if required environment variables are set
+- Verify the npm package name is correct
+- Some MCP servers require additional dependencies
 
-## Contributing
+## How It Works
 
-Pull requests welcome! Feel free to:
-- Add support for more MCP servers
-- Improve error handling
-- Add health check endpoints
-- Enhance documentation
+1. **Render starts the service** → runs `npm start`
+2. **server.js processes config.yaml** → replaces environment variables
+3. **mcp-gateway starts** → spawns all configured MCP servers
+4. **Each MCP server** → gets its own SSE endpoint at `/{name}`
+5. **Clients connect** → via path-based routing to the server they need
+
+## Credits
+
+Built with [mcp-gateway](https://github.com/acehoss/mcp-gateway) by [@acehoss](https://github.com/acehoss)
 
 ## License
 
 MIT
-
-## Credits
-
-Built with [Supergateway](https://github.com/supercorp-ai/supergateway) by Supercorp.
