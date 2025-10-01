@@ -5,6 +5,30 @@ const http = require('http');
 
 const PORT = process.env.PORT || 8000;
 
+// Validate environment variables
+function validateEnv() {
+  const warnings = [];
+  const errors = [];
+  
+  if (!process.env.SUPABASE_PROJECT_REF) {
+    warnings.push('⚠️  SUPABASE_PROJECT_REF not set - Supabase server may not work correctly');
+  }
+  if (!process.env.SUPABASE_ACCESS_TOKEN) {
+    warnings.push('⚠️  SUPABASE_ACCESS_TOKEN not set - Supabase server may not work correctly');
+  }
+  if (!process.env.GITHUB_TOKEN) {
+    warnings.push('⚠️  GITHUB_TOKEN not set - GitHub server may not work correctly');
+  }
+  
+  if (warnings.length > 0) {
+    console.log('\n⚠️  Environment Variable Warnings:');
+    warnings.forEach(w => console.log(`   ${w}`));
+    console.log('');
+  }
+  
+  return errors.length === 0;
+}
+
 // Configuration for MCP servers
 const MCP_SERVERS = [
   {
@@ -35,11 +59,21 @@ const MCP_SERVERS = [
 
 console.log('🚀 Starting MCP Gateway Hub with Multiple Supergateway Instances\n');
 
+// Validate environment variables
+validateEnv();
+
+// Show configured servers
+console.log(`📋 Configured MCP Servers (${MCP_SERVERS.length}):`);
+MCP_SERVERS.forEach(server => {
+  console.log(`   • ${server.name} (port ${server.port})`);
+});
+console.log('');
+
 // Store spawned processes
 const processes = [];
 
 // Helper function to check if a port is listening
-function checkPort(port, maxAttempts = 60, interval = 2000) {
+function checkPort(port, maxAttempts = 30, interval = 1000) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
     
@@ -47,7 +81,7 @@ function checkPort(port, maxAttempts = 60, interval = 2000) {
       attempts++;
       const socket = new net.Socket();
       
-      socket.setTimeout(1000);
+      socket.setTimeout(500);
       
       socket.on('connect', () => {
         socket.destroy();
@@ -69,7 +103,7 @@ function checkPort(port, maxAttempts = 60, interval = 2000) {
     
     const retry = () => {
       if (attempts >= maxAttempts) {
-        reject(new Error(`Port ${port} did not become available after ${maxAttempts} attempts`));
+        reject(new Error(`Port ${port} did not become available after ${maxAttempts} attempts (${maxAttempts * interval / 1000}s)`));
       } else {
         setTimeout(check, interval);
       }
@@ -82,16 +116,26 @@ function checkPort(port, maxAttempts = 60, interval = 2000) {
 // FIXED: Proper SSE proxy with full CORS support
 function proxySSE(serverName, targetPort, req, res) {
   const targetPath = req.path.replace(`/${serverName}`, '');
+  const queryString = req.url.includes('?') ? '?' + req.url.split('?')[1] : '';
+  const fullTargetPath = targetPath + queryString;
   
-  console.log(`[${serverName}] Proxying ${req.method} ${req.path} → http://localhost:${targetPort}${targetPath}`);
+  console.log(`[${serverName}] Proxying ${req.method} ${req.path}${queryString} → http://localhost:${targetPort}${fullTargetPath}`);
+  if (req.method === 'POST' || req.method === 'PUT') {
+    console.log(`[${serverName}] Content-Type: ${req.get('content-type')}, Content-Length: ${req.get('content-length')}`);
+  }
 
+  // Prepare headers - remove host and connection that need to be overridden
+  const headers = {...req.headers};
+  delete headers['host'];
+  delete headers['connection'];
+  
   const options = {
     hostname: 'localhost',
     port: targetPort,
-    path: targetPath + (req.url.includes('?') ? '?' + req.url.split('?')[1] : ''),
+    path: fullTargetPath,
     method: req.method,
     headers: {
-      ...req.headers,
+      ...headers,
       host: `localhost:${targetPort}`,
       connection: 'keep-alive'
     }
@@ -158,11 +202,18 @@ function proxySSE(serverName, targetPort, req, res) {
   // Handle proxy request errors
   proxyReq.on('error', (err) => {
     console.error(`[${serverName}] Proxy request error:`, err.message);
+    console.error(`[${serverName}] Error details:`, {
+      code: err.code,
+      syscall: err.syscall,
+      address: err.address,
+      port: err.port
+    });
     if (!res.headersSent) {
       res.status(502).json({ 
         error: 'Bad Gateway',
         server: serverName,
-        message: err.message 
+        message: err.message,
+        details: 'The MCP server backend is not responding. It may still be starting up.'
       });
     } else {
       res.end();
@@ -171,7 +222,14 @@ function proxySSE(serverName, targetPort, req, res) {
 
   // Forward request body for POST/PUT
   if (req.method === 'POST' || req.method === 'PUT') {
+    // Pipe the request body to the backend
     req.pipe(proxyReq);
+    
+    // Handle errors during piping
+    req.on('error', (err) => {
+      console.error(`[${serverName}] Request stream error:`, err.message);
+      proxyReq.destroy();
+    });
   } else {
     proxyReq.end();
   }
@@ -179,7 +237,9 @@ function proxySSE(serverName, targetPort, req, res) {
   // Handle client disconnect
   req.on('close', () => {
     console.log(`[${serverName}] Client disconnected`);
-    proxyReq.destroy();
+    if (!proxyReq.destroyed) {
+      proxyReq.destroy();
+    }
   });
 }
 
@@ -271,10 +331,20 @@ Promise.all(
 
   const app = express();
 
+  // CRITICAL: Trust proxy for Render deployment
+  app.set('trust proxy', true);
+
   // CRITICAL: Disable ALL automatic buffering in Express
   app.disable('view cache');
   app.disable('etag');
   app.disable('x-powered-by');
+
+  // Request logging middleware
+  app.use((req, res, next) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${req.method} ${req.path} - ${req.get('user-agent') || 'unknown'}`);
+    next();
+  });
 
   // CRITICAL: Global CORS middleware for ALL requests
   app.use((req, res, next) => {
@@ -289,9 +359,11 @@ Promise.all(
     next();
   });
 
-  // Parse JSON for non-SSE requests only
+  // Parse JSON ONLY for non-proxied endpoints (health, root)
+  // DO NOT parse JSON for /message or /sse endpoints that need to be proxied
   app.use((req, res, next) => {
-    if (!req.path.endsWith('/sse')) {
+    // Only parse JSON for our own endpoints, not proxied ones
+    if (req.path === '/health' || req.path === '/') {
       express.json()(req, res, next);
     } else {
       next();
@@ -301,19 +373,32 @@ Promise.all(
   // Health check endpoint
   app.get('/health', (req, res) => {
     res.header('Access-Control-Allow-Origin', '*');
+    // Fix protocol detection - Render uses X-Forwarded-Proto
+    const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
+    
+    // Check if backend ports are still listening
+    const serverStatus = processes.map(({ name, port }) => {
+      return {
+        name,
+        port,
+        endpoint: `${protocol}://${req.get('host')}/${name}`,
+        status: 'running' // Could be enhanced with actual health checks
+      };
+    });
+    
     res.json({ 
       status: 'ok',
-      servers: MCP_SERVERS.map(s => ({
-        name: s.name,
-        endpoint: `${req.protocol}://${req.get('host')}/${s.name}`
-      }))
+      version: '2.2.0',
+      servers: serverStatus
     });
   });
 
   // Root endpoint with server info
   app.get('/', (req, res) => {
     res.header('Access-Control-Allow-Origin', '*');
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    // Fix protocol detection - Render uses X-Forwarded-Proto
+    const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
+    const baseUrl = `${protocol}://${req.get('host')}`;
     res.json({
       name: 'MCP Gateway Hub',
       description: 'Multiple MCP servers via Supergateway',
