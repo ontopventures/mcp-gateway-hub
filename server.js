@@ -1,6 +1,7 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { spawn } = require('child_process');
+const net = require('net');
 
 const PORT = process.env.PORT || 8000;
 
@@ -36,6 +37,47 @@ console.log('🚀 Starting MCP Gateway Hub with Multiple Supergateway Instances\
 
 // Store spawned processes
 const processes = [];
+
+// Helper function to check if a port is listening
+function checkPort(port, maxAttempts = 60, interval = 2000) {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    
+    const check = () => {
+      attempts++;
+      const socket = new net.Socket();
+      
+      socket.setTimeout(1000);
+      
+      socket.on('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+      
+      socket.on('timeout', () => {
+        socket.destroy();
+        retry();
+      });
+      
+      socket.on('error', (err) => {
+        socket.destroy();
+        retry();
+      });
+      
+      socket.connect(port, '127.0.0.1');
+    };
+    
+    const retry = () => {
+      if (attempts >= maxAttempts) {
+        reject(new Error(`Port ${port} did not become available after ${maxAttempts} attempts`));
+      } else {
+        setTimeout(check, interval);
+      }
+    };
+    
+    check();
+  });
+}
 
 // Spawn Supergateway instance for each MCP server
 MCP_SERVERS.forEach(server => {
@@ -85,7 +127,7 @@ MCP_SERVERS.forEach(server => {
   proc.stderr.on('data', (data) => {
     const lines = data.toString().split('\n').filter(l => l.trim());
     lines.forEach(line => {
-      console.error(`[${server.name}] ERROR: ${line}`);
+      console.error(`[${server.name}] ${line}`);
     });
   });
 
@@ -97,12 +139,26 @@ MCP_SERVERS.forEach(server => {
     console.log(`[${server.name}] Exited with code ${code} and signal ${signal}`);
   });
 
-  processes.push({ name: server.name, process: proc });
+  processes.push({ name: server.name, process: proc, port: server.port });
 });
 
-// Give Supergateway instances time to start
-setTimeout(() => {
-  console.log('\n🌐 Starting Express Reverse Proxy...\n');
+// Wait for all Supergateway instances to be listening
+console.log('\n⏳ Waiting for all Supergateway instances to start...\n');
+
+Promise.all(
+  processes.map(({ name, port }) => {
+    console.log(`   Checking ${name} on port ${port}...`);
+    return checkPort(port)
+      .then(() => {
+        console.log(`   ✅ ${name} is ready on port ${port}`);
+      })
+      .catch(err => {
+        console.error(`   ❌ ${name} failed to start: ${err.message}`);
+        throw err;
+      });
+  })
+).then(() => {
+  console.log('\n🌐 All Supergateway instances are ready! Starting Express Reverse Proxy...\n');
 
   const app = express();
 
@@ -112,20 +168,21 @@ setTimeout(() => {
       status: 'ok',
       servers: MCP_SERVERS.map(s => ({
         name: s.name,
-        endpoint: `http://localhost:${PORT}/${s.name}`
+        endpoint: `${req.protocol}://${req.get('host')}/${s.name}`
       }))
     });
   });
 
   // Root endpoint with server info
   app.get('/', (req, res) => {
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.json({
       name: 'MCP Gateway Hub',
       description: 'Multiple MCP servers via Supergateway',
       servers: MCP_SERVERS.map(s => ({
         name: s.name,
-        sse: `http://localhost:${PORT}/${s.name}/sse`,
-        message: `http://localhost:${PORT}/${s.name}/message`
+        sse: `${baseUrl}/${s.name}/sse`,
+        message: `${baseUrl}/${s.name}/message`
       }))
     });
   });
@@ -187,8 +244,15 @@ setTimeout(() => {
     
     console.log(`\n💡 To add more MCP servers, edit the MCP_SERVERS array in server.js\n`);
   });
-
-}, 3000); // Wait 3 seconds for Supergateway instances to start
+}).catch(err => {
+  console.error('\n❌ Failed to start MCP Gateway Hub:', err.message);
+  console.error('   Shutting down...\n');
+  processes.forEach(({ name, process }) => {
+    console.log(`   Stopping ${name}...`);
+    process.kill('SIGTERM');
+  });
+  process.exit(1);
+});
 
 // Graceful shutdown
 const shutdown = (signal) => {
