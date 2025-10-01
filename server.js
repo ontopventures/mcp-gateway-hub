@@ -79,7 +79,7 @@ function checkPort(port, maxAttempts = 60, interval = 2000) {
   });
 }
 
-// FIXED: Proper SSE proxy that waits for backend response
+// FIXED: Proper SSE proxy with full CORS support
 function proxySSE(serverName, targetPort, req, res) {
   const targetPath = req.path.replace(`/${serverName}`, '');
   
@@ -100,25 +100,38 @@ function proxySSE(serverName, targetPort, req, res) {
   const proxyReq = http.request(options, (proxyRes) => {
     console.log(`[${serverName}] Backend responded with status: ${proxyRes.statusCode}`);
 
-    // CRITICAL: Wait for backend response, then set SSE headers based on backend
-    const headers = {
-      ...proxyRes.headers,
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no'
-    };
+    // CRITICAL: Preserve ALL headers from backend including CORS
+    const headers = { ...proxyRes.headers };
+
+    // Ensure CORS headers are present (Supergateway should send these, but ensure they're there)
+    if (!headers['access-control-allow-origin']) {
+      headers['access-control-allow-origin'] = '*';
+    }
+    if (!headers['access-control-allow-methods']) {
+      headers['access-control-allow-methods'] = 'GET, POST, OPTIONS';
+    }
+    if (!headers['access-control-allow-headers']) {
+      headers['access-control-allow-headers'] = 'Content-Type, Authorization, Accept';
+    }
+    
+    // Add additional SSE-specific headers
+    headers['cache-control'] = 'no-cache, no-transform';
+    headers['connection'] = 'keep-alive';
+    headers['x-accel-buffering'] = 'no';
 
     // If this is an SSE endpoint, ensure proper Content-Type
-    if (req.path.endsWith('/sse')) {
-      headers['Content-Type'] = 'text/event-stream';
+    if (req.path.endsWith('/sse') && !headers['content-type']) {
+      headers['content-type'] = 'text/event-stream';
     }
 
     // Write headers from backend response
     res.writeHead(proxyRes.statusCode, headers);
 
     // CRITICAL: Disable TCP buffering at socket level
-    res.socket.setNoDelay(true);
-    res.socket.setKeepAlive(true);
+    if (res.socket) {
+      res.socket.setNoDelay(true);
+      res.socket.setKeepAlive(true);
+    }
 
     // CRITICAL: Forward each chunk immediately as it arrives
     proxyRes.on('data', (chunk) => {
@@ -263,6 +276,19 @@ Promise.all(
   app.disable('etag');
   app.disable('x-powered-by');
 
+  // CRITICAL: Global CORS middleware for ALL requests
+  app.use((req, res, next) => {
+    // Handle OPTIONS preflight requests
+    if (req.method === 'OPTIONS') {
+      res.header('Access-Control-Allow-Origin', '*');
+      res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+      res.header('Access-Control-Max-Age', '86400'); // 24 hours
+      return res.status(200).end();
+    }
+    next();
+  });
+
   // Parse JSON for non-SSE requests only
   app.use((req, res, next) => {
     if (!req.path.endsWith('/sse')) {
@@ -274,6 +300,7 @@ Promise.all(
 
   // Health check endpoint
   app.get('/health', (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
     res.json({ 
       status: 'ok',
       servers: MCP_SERVERS.map(s => ({
@@ -285,6 +312,7 @@ Promise.all(
 
   // Root endpoint with server info
   app.get('/', (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.json({
       name: 'MCP Gateway Hub',
