@@ -3,6 +3,7 @@ FROM node:20-slim
 # Install necessary tools
 RUN apt-get update && apt-get install -y \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -15,9 +16,10 @@ RUN npm install
 
 # Copy application files
 COPY server.js .
+COPY config.yaml .
 
-# Expose ports (main status port + MCP server ports)
-EXPOSE 8000 8001 8002 8003 8004 8005
+# Expose main port (mcp-gateway handles all routing internally)
+EXPOSE 8000
 
 # Start the application
 CMD ["npm", "start"]
